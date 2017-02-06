@@ -1,0 +1,500 @@
+package org.antwork.test;
+
+import java.nio.ByteBuffer;
+import java.util.Timer;
+import java.util.TimerTask;
+
+import org.antwork.LinphoneException;
+import org.antwork.LinphoneManager;
+import org.antwork.LinphoneManager.LinphoneConfigException;
+import org.antwork.LinphoneService;
+import org.antwork.core.LinphoneAddress;
+import org.antwork.core.LinphoneAddress.TransportType;
+import org.antwork.core.LinphoneAuthInfo;
+import org.antwork.core.LinphoneCall;
+import org.antwork.core.LinphoneCall.State;
+import org.antwork.core.LinphoneCallStats;
+import org.antwork.core.LinphoneChatMessage;
+import org.antwork.core.LinphoneChatRoom;
+import org.antwork.core.LinphoneContent;
+import org.antwork.core.LinphoneCore;
+import org.antwork.core.LinphoneCore.AuthMethod;
+import org.antwork.core.LinphoneCore.EcCalibratorStatus;
+import org.antwork.core.LinphoneCore.GlobalState;
+import org.antwork.core.LinphoneCore.MediaEncryption;
+import org.antwork.core.LinphoneCore.RegistrationState;
+import org.antwork.core.LinphoneCore.RemoteProvisioningState;
+import org.antwork.core.LinphoneCore.Transports;
+import org.antwork.core.LinphoneCoreException;
+import org.antwork.core.LinphoneCoreFactory;
+import org.antwork.core.LinphoneCoreListener;
+import org.antwork.core.LinphoneCoreListenerBase;
+import org.antwork.core.LinphoneEvent;
+import org.antwork.core.LinphoneFriend;
+import org.antwork.core.LinphoneFriendList;
+import org.antwork.core.LinphoneInfoMessage;
+import org.antwork.core.LinphoneProxyConfig;
+import org.antwork.core.PayloadType;
+import org.antwork.core.PublishState;
+import org.antwork.core.SubscriptionState;
+import org.antwork.mediastream.Log;
+import org.antwork.mediastream.video.capture.hwconf.AndroidCameraConfiguration;
+import org.antwork.mediastream.video.capture.hwconf.AndroidCameraConfiguration.AndroidCamera;
+
+import android.content.Context;
+import android.content.pm.PackageManager.NameNotFoundException;
+import android.telephony.TelephonyManager;
+
+public class LinphoneTestManager implements LinphoneCoreListener{
+
+	private static LinphoneTestManager instance;
+	private Context mIContext;
+	private LinphoneCore mLc1, mLc2;
+
+	public String lastMessageReceived;
+	public boolean isDTMFReceived = false;
+	public boolean autoAnswer = true;
+	public boolean declineCall = false;
+
+	private final String linphoneRootCaFile;
+	private LinphoneCoreListenerBase mListener;
+
+	private Timer mTimer1 = new Timer("Linphone scheduler 1");
+	private Timer mTimer2 = new Timer("Linphone scheduler 2");
+
+	private LinphoneTestManager(Context ac, Context ic) {
+		mIContext = ic;
+		linphoneRootCaFile = ac.getFilesDir().getAbsolutePath() + "/rootca.pem";
+	}
+
+	public static LinphoneTestManager createAndStart(Context ac, Context ic, int id) {
+		if (instance == null)
+			instance = new LinphoneTestManager(ac, ic);
+
+		instance.startLibLinphone(ic, id);
+		TelephonyManager tm = (TelephonyManager) ac.getSystemService(Context.TELEPHONY_SERVICE);
+		boolean gsmIdle = tm.getCallState() == TelephonyManager.CALL_STATE_IDLE;
+		setGsmIdle(gsmIdle, id);
+
+		return instance;
+	}
+
+	private synchronized void startLibLinphone(Context c, int id) {
+		try {
+			LinphoneCoreFactory.instance().setDebugMode(true, "LinphoneTester");
+
+			final LinphoneCore mLc = LinphoneCoreFactory.instance().createLinphoneCore(this, c);
+			if (id == 2) {
+				mLc2 = mLc;
+			} else {
+				mLc1 = mLc;
+			}
+
+			mLc.setContext(c);
+			try {
+				String versionName = c.getPackageManager().getPackageInfo(c.getPackageName(), 0).versionName;
+				if (versionName == null) {
+					versionName = String.valueOf(c.getPackageManager().getPackageInfo(c.getPackageName(), 0).versionCode);
+				}
+				mLc.setUserAgent("LinphoneAndroid", versionName);
+			} catch (NameNotFoundException e) {
+				Log.e(e, "cannot get version name");
+			}
+
+			mLc.enableIpv6(false);
+			mLc.setRing(null);
+			mLc.setRootCA(linphoneRootCaFile);
+
+			int availableCores = Runtime.getRuntime().availableProcessors();
+			Log.w("MediaStreamer : " + availableCores + " cores detected and configured");
+			mLc.setCpuCount(availableCores);
+
+			Transports t = mLc.getSignalingTransportPorts();
+			t.udp = -1;
+			t.tcp = -1;
+			mLc.setSignalingTransportPorts(t);
+
+			try {
+				initFromConf(mLc);
+			} catch (LinphoneException e) {
+				Log.w("no config ready yet");
+			}
+
+			TimerTask lTask = new TimerTask() {
+				@Override
+				public void run() {
+					mLc.iterate();
+				}
+			};
+
+			if (id == 2) {
+				mTimer2.scheduleAtFixedRate(lTask, 0, 20);
+			} else {
+				mTimer1.scheduleAtFixedRate(lTask, 0, 20);
+			}
+
+	        resetCameraFromPreferences();
+		}
+		catch (Exception e) {
+			Log.e(e, "Cannot start linphone");
+		}
+	}
+
+	private void resetCameraFromPreferences() {
+		boolean useFrontCam = true;
+		int camId = 0;
+		AndroidCamera[] cameras = AndroidCameraConfiguration.retrieveCameras();
+		for (AndroidCamera androidCamera : cameras) {
+			if (androidCamera.frontFacing == useFrontCam)
+				camId = androidCamera.id;
+		}
+		LinphoneManager.getLc().setVideoDevice(camId);
+	}
+
+	public void initFromConf(LinphoneCore mLc) throws LinphoneConfigException, LinphoneCoreException {
+		LinphoneCoreFactory.instance().setDebugMode(true, "LinphoneTester");
+
+		initAccounts(mLc);
+
+		mLc.setVideoPolicy(true, true);
+		mLc.enableVideo(true, true);
+
+		mLc.setUseRfc2833ForDtmfs(false);
+		mLc.setUseSipInfoForDtmfs(true);
+
+		mLc.setNetworkReachable(true);
+	}
+
+	public boolean detectVideoCodec(String mime, LinphoneCore mLc) {
+		for (PayloadType videoCodec : mLc.getVideoCodecs()) {
+			if (mime.equals(videoCodec.getMime())) return true;
+		}
+		return false;
+	}
+
+	public boolean detectAudioCodec(String mime, LinphoneCore mLc){
+		for (PayloadType audioCodec : mLc.getAudioCodecs()) {
+			if (mime.equals(audioCodec.getMime())) return true;
+		}
+		return false;
+	}
+
+	void initMediaEncryption(LinphoneCore mLc){
+		MediaEncryption me = MediaEncryption.None;
+		mLc.setMediaEncryption(me);
+	}
+
+	private void initAccounts(LinphoneCore mLc) throws LinphoneCoreException {
+		mLc.clearAuthInfos();
+		mLc.clearProxyConfigs();
+
+		String username, password, domain;
+		if (mLc.equals(mLc1)) {
+			username = mIContext.getString(org.antwork.test.R.string.account_test_calls_login);
+			password = mIContext.getString(org.antwork.test.R.string.account_test_calls_pwd);
+			domain = mIContext.getString(org.antwork.test.R.string.account_test_calls_domain);
+		} else {
+			username = mIContext.getString(org.antwork.test.R.string.conference_account_login);
+			password = mIContext.getString(org.antwork.test.R.string.conference_account_password);
+			domain = mIContext.getString(org.antwork.test.R.string.conference_account_domain);
+		}
+
+		LinphoneAuthInfo lAuthInfo =  LinphoneCoreFactory.instance().createAuthInfo(username, password, null, domain);
+		mLc.addAuthInfo(lAuthInfo);
+		String identity = "sip:" + username +"@" + domain;
+		String proxy = "sip:" + domain;
+		LinphoneAddress proxyAddr = LinphoneCoreFactory.instance().createLinphoneAddress(proxy);
+		proxyAddr.setTransport(TransportType.LinphoneTransportTls);
+		LinphoneProxyConfig proxycon = mLc.createProxyConfig(identity, proxyAddr.asStringUriOnly(), proxyAddr.asStringUriOnly(), true);
+		mLc.addProxyConfig(proxycon);
+		mLc.setDefaultProxyConfig(proxycon);
+
+		LinphoneProxyConfig lDefaultProxyConfig = mLc.getDefaultProxyConfig();
+		if (lDefaultProxyConfig != null) {
+			//escape +
+			lDefaultProxyConfig.setDialEscapePlus(false);
+		} else if (LinphoneService.isReady()) {
+			getLc().addListener(this);
+			this.registrationState(mLc, lDefaultProxyConfig, RegistrationState.RegistrationNone, null);
+		}
+	}
+
+	public static synchronized final LinphoneTestManager getInstance() {
+		return instance;
+	}
+
+	public static synchronized final LinphoneCore getLc(int i) {
+		if (i == 2)
+			return getInstance().mLc2;
+		return getInstance().mLc1;
+	}
+
+	public static synchronized final LinphoneCore getLc() {
+		return getLc(1);
+	}
+
+	private int savedMaxCallWhileGsmIncall;
+	private synchronized void preventSIPCalls(LinphoneCore mLc) {
+		if (savedMaxCallWhileGsmIncall != 0) {
+			Log.w("SIP calls are already blocked due to GSM call running");
+			return;
+		}
+		savedMaxCallWhileGsmIncall = mLc.getMaxCalls();
+		mLc.setMaxCalls(0);
+	}
+	private synchronized void allowSIPCalls(LinphoneCore mLc) {
+		if (savedMaxCallWhileGsmIncall == 0) {
+			Log.w("SIP calls are already allowed as no GSM call knowned to be running");
+			return;
+		}
+		mLc.setMaxCalls(savedMaxCallWhileGsmIncall);
+		savedMaxCallWhileGsmIncall = 0;
+	}
+	public static void setGsmIdle(boolean gsmIdle, int id) {
+		LinphoneTestManager mThis = instance;
+		if (mThis == null) return;
+		if (gsmIdle) {
+			mThis.allowSIPCalls(LinphoneTestManager.getLc(id));
+		} else {
+			mThis.preventSIPCalls(LinphoneTestManager.getLc(id));
+		}
+	}
+
+	private void doDestroy() {
+		try {
+			mTimer1.cancel();
+			mTimer2.cancel();
+			mLc1.destroy();
+			mLc2.destroy();
+		}
+		catch (RuntimeException e) {
+			e.printStackTrace();
+		}
+		finally {
+			mLc1 = null;
+			mLc2 = null;
+			instance = null;
+		}
+	}
+
+	public static synchronized void destroy() {
+		if (instance == null) return;
+		instance.doDestroy();
+	}
+
+	@Override
+	public void globalState(LinphoneCore lc, GlobalState state, String message) {
+		// TODO Auto-generated method stub
+
+	}
+
+	@Override
+	public void callState(LinphoneCore lc, LinphoneCall call, State cstate,
+			String message) {
+		// TODO Auto-generated method stub
+		Log.e("Call state = " + cstate.toString());
+		if (cstate == LinphoneCall.State.IncomingReceived) {
+			if (declineCall) {
+				lc.terminateCall(call);
+			} else if (autoAnswer) {
+				try {
+					lc.acceptCall(call);
+				} catch (LinphoneCoreException e) {
+					e.printStackTrace();
+				}
+			}
+		}
+	}
+
+	@Override
+	public void callStatsUpdated(LinphoneCore lc, LinphoneCall call,
+			LinphoneCallStats stats) {
+		// TODO Auto-generated method stub
+
+	}
+
+	@Override
+	public void callEncryptionChanged(LinphoneCore lc, LinphoneCall call,
+			boolean encrypted, String authenticationToken) {
+		// TODO Auto-generated method stub
+
+	}
+
+	@Override
+	public void registrationState(LinphoneCore lc, LinphoneProxyConfig cfg,
+			RegistrationState cstate, String smessage) {
+		// TODO Auto-generated method stub
+		Log.e("Registration state = " + cstate.toString());
+	}
+
+	@Override
+	public void newSubscriptionRequest(LinphoneCore lc, LinphoneFriend lf,
+			String url) {
+		// TODO Auto-generated method stub
+
+	}
+
+	@Override
+	public void notifyPresenceReceived(LinphoneCore lc, LinphoneFriend lf) {
+		// TODO Auto-generated method stub
+
+	}
+
+	@Override
+	public void messageReceived(LinphoneCore lc, LinphoneChatRoom cr,
+			LinphoneChatMessage message) {
+		// TODO Auto-generated method stub
+		Log.e("Message received = " + message.getText());
+		lastMessageReceived = message.getText();
+	}
+
+	@Override
+	public void dtmfReceived(LinphoneCore lc, LinphoneCall call, int dtmf) {
+		// TODO Auto-generated method stub
+		Log.e("DTMF received = " + dtmf);
+		isDTMFReceived = true;
+	}
+
+	@Override
+	public void notifyReceived(LinphoneCore lc, LinphoneCall call,
+			LinphoneAddress from, byte[] event) {
+		// TODO Auto-generated method stub
+
+	}
+
+	@Override
+	public void show(LinphoneCore lc) {
+		// TODO Auto-generated method stub
+
+	}
+
+	@Override
+	public void displayStatus(LinphoneCore lc, String message) {
+		// TODO Auto-generated method stub
+
+	}
+
+	@Override
+	public void displayMessage(LinphoneCore lc, String message) {
+		// TODO Auto-generated method stub
+
+	}
+
+	@Override
+	public void displayWarning(LinphoneCore lc, String message) {
+		// TODO Auto-generated method stub
+
+	}
+
+	@Override
+	public void transferState(LinphoneCore lc, LinphoneCall call,
+			State new_call_state) {
+		// TODO Auto-generated method stub
+
+	}
+
+	@Override
+	public void infoReceived(LinphoneCore lc, LinphoneCall call,
+			LinphoneInfoMessage info) {
+		// TODO Auto-generated method stub
+
+	}
+
+	@Override
+	public void subscriptionStateChanged(LinphoneCore lc, LinphoneEvent ev,
+			SubscriptionState state) {
+		// TODO Auto-generated method stub
+
+	}
+
+	@Override
+	public void notifyReceived(LinphoneCore lc, LinphoneEvent ev,
+			String eventName, LinphoneContent content) {
+		// TODO Auto-generated method stub
+
+	}
+
+	@Override
+	public void publishStateChanged(LinphoneCore lc, LinphoneEvent ev,
+			PublishState state) {
+		// TODO Auto-generated method stub
+
+	}
+
+	@Override
+	public void isComposingReceived(LinphoneCore lc, LinphoneChatRoom cr) {
+		// TODO Auto-generated method stub
+	}
+
+	@Override
+	public void configuringStatus(LinphoneCore lc,
+			RemoteProvisioningState state, String message) {
+		// TODO Auto-generated method stub
+	}
+
+	@Override
+	public void authInfoRequested(LinphoneCore lc, String realm,
+			String username, String domain) {
+		// TODO Auto-generated method stub
+		
+	}
+	
+	@Override
+	public void authenticationRequested(LinphoneCore lc,
+			LinphoneAuthInfo authInfo, AuthMethod method) {
+		// TODO Auto-generated method stub
+		
+	}
+
+	@Override
+	public void fileTransferProgressIndication(LinphoneCore lc,
+			LinphoneChatMessage message, LinphoneContent content, int progress) {
+		// TODO Auto-generated method stub
+
+	}
+
+	@Override
+	public void fileTransferRecv(LinphoneCore lc, LinphoneChatMessage message,
+			LinphoneContent content, byte[] buffer, int size) {
+		// TODO Auto-generated method stub
+
+	}
+
+	@Override
+	public int fileTransferSend(LinphoneCore lc, LinphoneChatMessage message,
+			LinphoneContent content, ByteBuffer buffer, int size) {
+		// TODO Auto-generated method stub
+		return 0;
+	}
+
+	@Override
+	public void uploadProgressIndication(LinphoneCore lc, int offset, int total)  {
+		// TODO Auto-generated method stub
+
+	}
+
+
+	@Override
+	public void uploadStateChanged(LinphoneCore lc, LinphoneCore.LogCollectionUploadState state,
+			String info) {
+		// TODO Auto-generated method stub
+
+	}
+
+	@Override
+	public void ecCalibrationStatus(LinphoneCore lc, EcCalibratorStatus status,
+									int delay_ms, Object data) {
+		// TODO Auto-generated method stub
+
+	}
+
+	@Override
+	public void friendListCreated(LinphoneCore lc, LinphoneFriendList list) {
+		// TODO Auto-generated method stub
+	}
+	
+	@Override
+	public void friendListRemoved(LinphoneCore lc, LinphoneFriendList list) {
+		// TODO Auto-generated method stub
+	}
+}
