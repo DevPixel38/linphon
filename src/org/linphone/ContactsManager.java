@@ -19,7 +19,10 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 package org.linphone;
 
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Calendar;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
@@ -32,6 +35,7 @@ import java.util.concurrent.TimeUnit;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import org.linphone.core.LinphoneAddress;
+import org.linphone.core.LinphoneConference;
 import org.linphone.core.LinphoneCore;
 import org.linphone.core.LinphoneFriend;
 import org.linphone.core.LinphoneFriendImpl;
@@ -56,6 +60,7 @@ import android.os.Message;
 import android.provider.ContactsContract;
 import android.provider.ContactsContract.CommonDataKinds;
 import android.provider.ContactsContract.Data;
+import android.util.Base64;
 
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
@@ -77,7 +82,7 @@ public class ContactsManager extends ContentObserver {
     private HashMap<String, LinphoneContact> androidContactsCache;
     private LinphoneContact contactNotFound;
     private Bitmap defaultAvatar;
-    private final String baseUrl = "http://172.16.60.36/aem/public/api/v1/extensions";
+    private final String baseUrl = "https://pbx.microservices.antwork.com/api/v1/extensions";
 
     private static ArrayList<ContactsUpdatedListener> contactsUpdatedListeners;
 
@@ -346,30 +351,53 @@ public class ContactsManager extends ContentObserver {
             if (this.isCancelled()) {
                 return null;
             }
-
-            OkHttpClient client = new OkHttpClient();
-            Request request = new Request.Builder().get().url(baseUrl).build();
-            try {
-                Response response = client.newCall(request).execute();
-                if (response.isSuccessful()) {
-                    JSONObject jsonObject = new JSONObject(response.body().string());
-                    JSONArray dataObject = jsonObject.getJSONArray("data");
-                    for (int i = 0; i < dataObject.length(); i++) {
-                        JSONObject user = dataObject.getJSONObject(i);
-                        LinphoneContact contact = new LinphoneContact();
-                        contact.setFullName(user.getJSONObject("user").getString("name"));
-                        contact.setOrganization(user.getJSONObject("user").getString("companyName"));
-                        contact.addNumberOrAddress(new
-                                LinphoneNumberOrAddress(user.getString("fullExtention"), true));
-                        sipContacts.add(contact);
+            SimpleDateFormat format = new SimpleDateFormat("yyyy-MM-dd");
+            if (context == null)
+                return null;
+            String lastSyncDate = context.getSharedPreferences(context.getPackageName(), Context.MODE_PRIVATE).getString("Date", null);
+            if (lastSyncDate == null
+                    || (!lastSyncDate.equals(format.format(Calendar.getInstance().getTime()))
+                    || Cache.getDefaultInstance(context).readObject("LinphoneContact", LinphoneContact[].class) == null)) {
+                OkHttpClient client = new OkHttpClient();
+                String base64String = Base64.encodeToString("demo:user".getBytes(), Base64.NO_WRAP);
+                Request request = new Request.Builder().get().url(baseUrl).addHeader("Authorization", "Basic " + base64String).build();
+                try {
+                    Response response = client.newCall(request).execute();
+                    if (response.isSuccessful()) {
+                        JSONObject jsonObject = new JSONObject(response.body().string());
+                        JSONArray dataObject = jsonObject.getJSONArray("data");
+                        for (int i = 0; i < dataObject.length(); i++) {
+                            JSONObject user = dataObject.getJSONObject(i);
+                            LinphoneContact contact = new LinphoneContact();
+                            contact.setFullName(user.getJSONObject("user").getString("name"));
+                            contact.setOrganization(user.getJSONObject("user").getString("companyName"));
+                            contact.addNumberOrAddress(new
+                                    LinphoneNumberOrAddress(user.getString("fullExtention"), true));
+                            sipContacts.add(contact);
+                            contacts.add(contact);
+                        }
+                        context.getSharedPreferences(context.getPackageName(), Context.MODE_PRIVATE).edit().putString("Date", format.format(Calendar.getInstance().getTime())).apply();
+                        Cache.getDefaultInstance(context).writeObject("LinphoneContact", contacts);
+                    } else {
+                        Log.d("Contacts", "Failed to fetch Contacts");
                     }
-                } else {
-                    Log.d("Contacts", "Failed to fetch Contacts");
+
+                } catch (Exception ex) {
+                    ex.printStackTrace();
+                }
+            } else {
+                Log.d("Contacts", "Contacts already synced, no need for another Sync");
+                Object object = Cache.getDefaultInstance(context).readObject("LinphoneContact", LinphoneContact[].class);
+                if (object != null && object instanceof LinphoneContact[]) {
+                    LinphoneContact[] linphonContacts = (LinphoneContact[]) object;
+                    if (linphonContacts != null) {
+                        contacts.addAll(Arrays.asList(linphonContacts));
+                        sipContacts.addAll(Arrays.asList(linphonContacts));
+                    }
                 }
 
-            } catch (Exception ex) {
-                ex.printStackTrace();
             }
+
 
             if (hasContactsAccess()) {
                 Cursor c = getContactsCursor(contentResolver);

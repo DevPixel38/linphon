@@ -365,13 +365,13 @@ public class LinphoneActivity extends LinphoneGenericActivity implements OnClick
                 break;
             case CONTACTS_LIST:
                 // checkAndRequestReadContactsPermission();
-                //fragment = new ContactsListFragment();
-                new AlertDialog.Builder(this).setMessage(getString(R.string.feature_disabled))
+                fragment = new ContactsListFragment();
+                /*new AlertDialog.Builder(this).setMessage(getString(R.string.feature_disabled))
                         .setPositiveButton(getString(R.string.ok), null).show();
                 fragment = new DialerFragment();
                 if (extras == null) {
                     fragment.setInitialSavedState(dialerSavedState);
-                }
+                }*/
                 break;
             case CONTACT_DETAIL:
                 fragment = new ContactDetailsFragment();
@@ -1281,6 +1281,8 @@ public class LinphoneActivity extends LinphoneGenericActivity implements OnClick
         int contacts = getPackageManager().checkPermission(Manifest.permission.READ_CONTACTS, getPackageName());
         Log.i("[Permission] Contacts permission is " + (contacts == PackageManager.PERMISSION_GRANTED ? "granted" : "denied"));
 
+        int mic = getPackageManager().checkPermission(Manifest.permission.RECORD_AUDIO, getPackageName());
+        Log.i("[Permission] Read phone state permission is " + (mic == PackageManager.PERMISSION_GRANTED ? "granted" : "denied"));
         int readPhone = getPackageManager().checkPermission(Manifest.permission.READ_PHONE_STATE, getPackageName());
         Log.i("[Permission] Read phone state permission is " + (readPhone == PackageManager.PERMISSION_GRANTED ? "granted" : "denied"));
 
@@ -1299,18 +1301,18 @@ public class LinphoneActivity extends LinphoneGenericActivity implements OnClick
                 permissionsList.add(Manifest.permission.READ_PHONE_STATE);
             }
         }
-        if (contacts != PackageManager.PERMISSION_GRANTED) {
-            if (LinphonePreferences.instance().firstTimeAskingForPermission(Manifest.permission.READ_CONTACTS) || ActivityCompat.shouldShowRequestPermissionRationale(this, Manifest.permission.READ_CONTACTS)) {
-                Log.i("[Permission] Asking for contacts");
-                permissionsList.add(Manifest.permission.READ_CONTACTS);
-            }
-        } else {
-            if (!fetchedContactsOnce) {
-                ContactsManager.getInstance().enableContactsAccess();
-                ContactsManager.getInstance().fetchContactsAsync();
-                fetchedContactsOnce = true;
+
+
+        if (mic != PackageManager.PERMISSION_GRANTED) {
+            if (LinphonePreferences.instance().firstTimeAskingForPermission(Manifest.permission.RECORD_AUDIO) || ActivityCompat.shouldShowRequestPermissionRationale(this, Manifest.permission.RECORD_AUDIO)) {
+                Log.i("[Permission] Asking for RECORD_AUDIO");
+                permissionsList.add(Manifest.permission.RECORD_AUDIO);
             }
         }
+
+        ContactsManager.getInstance().fetchContactsAsync();
+        fetchedContactsOnce = true;
+
 
         if (permissionsList.size() > 0) {
             String[] permissions = new String[permissionsList.size()];

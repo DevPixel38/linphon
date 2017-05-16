@@ -7,6 +7,7 @@ import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.graphics.Bitmap;
 import android.net.Uri;
 import android.os.AsyncTask;
 import android.os.Build;
@@ -21,6 +22,7 @@ import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
 import android.webkit.WebStorage;
 import android.webkit.WebView;
+import android.webkit.WebViewClient;
 
 import org.json.JSONObject;
 
@@ -37,6 +39,7 @@ public class LoginWithAntworkActivity extends Activity {
     public static final MediaType URLEncoded
             = MediaType.parse("text/plain");
     private Uri data = null;
+    private ProgressDialog dialog;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -56,6 +59,9 @@ public class LoginWithAntworkActivity extends Activity {
         } catch (Exception ex) {
             ex.printStackTrace();
         }
+        dialog = new ProgressDialog(LoginWithAntworkActivity.this);
+        dialog.setCancelable(false);
+        dialog.setCanceledOnTouchOutside(false);
     }
 
     @SuppressWarnings("deprecation")
@@ -95,8 +101,21 @@ public class LoginWithAntworkActivity extends Activity {
         webView.getSettings().setDatabaseEnabled(false);
         webView.getSettings().setDomStorageEnabled(true);
 
+        webView.setWebViewClient(new WebViewClient() {
+            @Override
+            public void onPageStarted(WebView view, String url, Bitmap favicon) {
+                dialog.show();
+                super.onPageStarted(view, url, favicon);
+            }
 
-        webView.loadUrl("https://members.antwork.com/#/account/externalsignin?appId=AWMSG&appDomain=http://apps.antwork.com/phone&devicePlatform=ANDROID&deviceToken=NAAPPbccb1599a022b97fcc95b932155e1d6f&openLocation=http://localhost/");
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                super.onPageFinished(view, url);
+                dialog.dismiss();
+            }
+        });
+
+        webView.loadUrl("https://members.antwork.com/#/account/");
 
         webView.addJavascriptInterface(new Object() {
             @JavascriptInterface           // For API 17+
@@ -172,22 +191,25 @@ public class LoginWithAntworkActivity extends Activity {
     }
 
     private class AsyncRequest extends AsyncTask<String, String, Boolean> {
-        private ProgressDialog dialog;
+
         private String fullName = "";
         private String UserId = "";
         private String SIPUsername = "";
         private String SIPPassword = "";
+        private ProgressDialog mDialog;
 
         public AsyncRequest() {
-            dialog = new ProgressDialog(LoginWithAntworkActivity.this);
-            dialog.setCancelable(false);
-            dialog.setCanceledOnTouchOutside(false);
+            if (mDialog == null) {
+                mDialog = new ProgressDialog(LoginWithAntworkActivity.this);
+                mDialog.setCancelable(false);
+                mDialog.setCanceledOnTouchOutside(false);
+            }
         }
 
         @Override
         protected void onPreExecute() {
             super.onPreExecute();
-            this.dialog.show();
+            mDialog.show();
         }
 
         @Override
@@ -195,12 +217,10 @@ public class LoginWithAntworkActivity extends Activity {
             try {
                 OkHttpClient client = new OkHttpClient();
 
-                RequestBody body = new FormBody.Builder().add("TOKEN", params[0]).add("DEVICETOKEN", "NAAPPbccb1599a022b97fcc95b932155e1d6f").build();
+                RequestBody body = new FormBody.Builder().add("TOKEN", params[0]).add("DEVICETOKEN", "ANDROID").build();
 
                 Request request = new Request.Builder()
-                        .url("https://members.antwork.com/server/api/apiservice/GetUserDetails")
-                        .addHeader("EXTERNALAPPID", "AWMSG")
-                        .addHeader("EXTERNALAPPSECRET", "7MP2U1P467D3CzX")
+                        .url("https://members.antwork.com/gateway/api/Users/GetUserDetails")
                         .post(body).build();
                 Response response = client.newCall(request).execute();
                 String jsonResponse = response.body().string();
@@ -224,7 +244,7 @@ public class LoginWithAntworkActivity extends Activity {
         @Override
         protected void onPostExecute(Boolean s) {
             super.onPostExecute(s);
-            dialog.dismiss();
+            mDialog.dismiss();
 
             if (SIPUsername == null || SIPUsername.equals("null") || SIPUsername.isEmpty() || SIPPassword.trim().length() == 0) {
                 new AlertDialog.Builder(LoginWithAntworkActivity.this).setTitle(getString(R.string.error))
